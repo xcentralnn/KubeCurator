@@ -2,7 +2,7 @@
   <img src="./docs/logo.png" width="220"/>
 </p>
 
-<h1 align="center">KubeCurator</h1>
+<h1 align="center">Curator</h1>
 
 <p align="center">
   Kubernetes-native intelligent control plane.
@@ -20,7 +20,7 @@
 
 ## Overview
 
-KubeCurator is a Kubernetes-native intelligent control plane designed to optimize workloads, reduce misconfigurations, and improve resource efficiency.
+Curator is a Kubernetes-native intelligent control plane designed to optimize workloads, reduce misconfigurations, and improve resource efficiency.
 
 It operates as a set of custom controllers that continuously observe cluster state, analyze system behavior, and apply corrective or optimizing actions.
 
@@ -40,7 +40,7 @@ Operational complexity and drift
 
 ## Solution
 
-KubeCurator introduces an intelligent reconciliation layer:
+Curator introduces an intelligent reconciliation layer:
 
 Machine learning for predictive autoscaling
 Policy-based validation for configuration correctness

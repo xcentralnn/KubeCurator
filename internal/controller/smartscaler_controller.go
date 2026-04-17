@@ -1,87 +1,152 @@
-// internal/controller/smartscaler_controller.go
-
 package controller
 
 import (
-    "context"
-    "math"
+	"context"
+	"math"
+	"time"
 
-    appsv1 "k8s.io/api/apps/v1"
-    "k8s.io/apimachinery/pkg/types"
-    ctrl "sigs.k8s.io/controller-runtime"
-    "sigs.k8s.io/controller-runtime/pkg/client"
+	appsv1 "k8s.io/api/apps/v1"
+	"k8s.io/apimachinery/pkg/types"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-    aiopsv1 "github.com/xcentralnn/kubecurator/api/v1alpha1"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	curatorv1 "github.com/xcentralnn/curator/api/v1alpha1"
 )
 
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=curator.dev,resources=smartscalers,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=curator.dev,resources=smartscalers/status,verbs=get;update;patch
+
 type SmartScalerReconciler struct {
-    client.Client
+	client.Client
 }
 
 func (r *SmartScalerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	log := ctrl.LoggerFrom(ctx)
 
-    var scaler aiopsv1.SmartScaler
-    if err := r.Get(ctx, req.NamespacedName, &scaler); err != nil {
-        return ctrl.Result{}, client.IgnoreNotFound(err)
-    }
+	var scaler curatorv1.SmartScaler
+	if err := r.Get(ctx, req.NamespacedName, &scaler); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
 
-    // 1. Fetch target deployment
-    var deploy appsv1.Deployment
-    key := types.NamespacedName{
-        Name:      scaler.Spec.TargetRef.Name,
-        Namespace: req.Namespace,
-    }
+	// Resolve namespace
+	ns := scaler.Spec.TargetRef.Namespace
+	if ns == "" {
+		ns = req.Namespace
+	}
 
-    if err := r.Get(ctx, key, &deploy); err != nil {
-        return ctrl.Result{}, err
-    }
+	// Fetch Deployment
+	var deploy appsv1.Deployment
+	key := types.NamespacedName{
+		Name:      scaler.Spec.TargetRef.Name,
+		Namespace: ns,
+	}
 
-    // 2. Mock metrics (replace with Prometheus later)
-    cpuUsage := getMockCPU()
+	if err := r.Get(ctx, key, &deploy); err != nil {
+		log.Error(err, "failed to get target deployment")
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
 
-    // 3. Predict (placeholder ML)
-    predicted := predict(cpuUsage)
+	// Current replicas
+	var current int32 = 1
+	if deploy.Spec.Replicas != nil {
+		current = *deploy.Spec.Replicas
+	}
 
-    // 4. Compute replicas
-    targetCPU := 0.6
-    replicas := int32(math.Ceil(predicted / targetCPU))
+	// ---- Metrics + Prediction ----
+	cpu := getMockCPU()
+	predicted := predict(cpu)
 
-    if replicas < scaler.Spec.MinReplicas {
-        replicas = scaler.Spec.MinReplicas
-    }
-    if replicas > scaler.Spec.MaxReplicas {
-        replicas = scaler.Spec.MaxReplicas
-    }
+	// ---- Compute desired ----
+	target := scaler.Spec.TargetCPUUtilization
+	if target == 0 {
+		target = 0.6
+	}
 
-    // 5. Apply scaling
-    deploy.Spec.Replicas = &replicas
-    if err := r.Update(ctx, &deploy); err != nil {
-        return ctrl.Result{}, err
-    }
+	desired := int32(math.Ceil(predicted / target))
 
-    // 6. Update status
-    scaler.Status.CurrentReplicas = replicas
-    scaler.Status.PredictedLoad = predicted
-    _ = r.Status().Update(ctx, &scaler)
+	// Clamp
+	if desired < scaler.Spec.MinReplicas {
+		desired = scaler.Spec.MinReplicas
+	}
+	if desired > scaler.Spec.MaxReplicas {
+		desired = scaler.Spec.MaxReplicas
+	}
 
-    return ctrl.Result{}, nil
+	// ---- Idempotency ----
+	if current == desired {
+		log.Info("no scaling required", "replicas", current)
+
+		r.updateStatus(ctx, &scaler, current, desired, predicted)
+
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	// ---- Cooldown ----
+	if !scaler.Status.LastScaleTime.IsZero() && scaler.Spec.CooldownSeconds > 0 {
+		elapsed := time.Since(scaler.Status.LastScaleTime.Time)
+		if elapsed < time.Duration(scaler.Spec.CooldownSeconds)*time.Second {
+			log.Info("cooldown active")
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		}
+	}
+
+	// ---- Mode: recommend only ----
+	if scaler.Spec.Mode == "recommend" {
+		log.Info("recommend mode, skipping scale")
+
+		r.updateStatus(ctx, &scaler, current, desired, predicted)
+
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	// ---- Apply scaling (safe patch) ----
+	patch := client.MergeFrom(deploy.DeepCopy())
+	deploy.Spec.Replicas = &desired
+
+	if err := r.Patch(ctx, &deploy, patch); err != nil {
+		log.Error(err, "failed to patch deployment")
+		return ctrl.Result{}, err
+	}
+
+	log.Info("scaled deployment", "from", current, "to", desired)
+
+	// ---- Update status ----
+	scaler.Status.LastScaleTime = metav1.Now()
+	r.updateStatus(ctx, &scaler, current, desired, predicted)
+
+	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+}
+
+func (r *SmartScalerReconciler) updateStatus(
+	ctx context.Context,
+	scaler *curatorv1.SmartScaler,
+	current, desired int32,
+	predicted float64,
+) {
+	scaler.Status.CurrentReplicas = current
+	scaler.Status.DesiredReplicas = desired
+	scaler.Status.PredictedLoad = predicted
+
+	_ = r.Status().Update(ctx, scaler)
 }
 
 // ---- Mock ML ----
 
 func getMockCPU() float64 {
-    return 0.75
+	return 0.75
 }
 
 func predict(x float64) float64 {
-    // placeholder for ML model
-    return x * 1.1
+	return x * 1.1
 }
 
 // ---- Setup ----
 
 func (r *SmartScalerReconciler) SetupWithManager(mgr ctrl.Manager) error {
-    return ctrl.NewControllerManagedBy(mgr).
-        For(&aiopsv1.SmartScaler{}).
-        Complete(r)
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&curatorv1.SmartScaler{}).
+		Complete(r)
 }

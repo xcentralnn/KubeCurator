@@ -1,30 +1,39 @@
-// cmd/main.go
-
 package main
 
 import (
-    "os"
+	"os"
 
-    ctrl "sigs.k8s.io/controller-runtime"
+	ctrl "sigs.k8s.io/controller-runtime"
 
-    "github.com/xcentralnn/kubecurator/internal/controller"
+	"k8s.io/apimachinery/pkg/runtime"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+
+	curatorv1 "github.com/xcentralnn/curator/api/v1alpha1"
+	"github.com/xcentralnn/curator/internal/controller"
 )
 
 func main() {
-    mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-        MetricsBindAddress: ":8080",
-    })
-    if err != nil {
-        os.Exit(1)
-    }
+	scheme := runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(curatorv1.AddToScheme(scheme))
 
-    if err = (&controller.SmartScalerReconciler{
-        Client: mgr.GetClient(),
-    }).SetupWithManager(mgr); err != nil {
-        os.Exit(1)
-    }
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+		Scheme:             scheme,
+		MetricsBindAddress: ":8080",
+	})
+	if err != nil {
+		os.Exit(1)
+	}
 
-    if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
-        os.Exit(1)
-    }
+	if err = (&controller.SmartScalerReconciler{
+		Client: mgr.GetClient(),
+	}).SetupWithManager(mgr); err != nil {
+		os.Exit(1)
+	}
+
+	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+		os.Exit(1)
+	}
 }
