@@ -4,6 +4,7 @@ import (
 	"os"
 
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -20,8 +21,10 @@ func main() {
 	utilruntime.Must(curatorv1.AddToScheme(scheme))
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:             scheme,
-		MetricsBindAddress: ":8080",
+		Scheme: scheme,
+		Metrics: server.Options{
+			BindAddress: ":8080",
+		},
 	})
 	if err != nil {
 		os.Exit(1)
